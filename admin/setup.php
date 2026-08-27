@@ -22,6 +22,8 @@ if ($action == 'save') {
 	dolibarr_set_const($db, "VERIFACTU_MODE", GETPOST("VERIFACTU_MODE", 'alpha'), 'chaine', 0, '', $conf->entity);
 	$auto_send = GETPOST("VERIFACTU_AUTO_SEND", 'alpha') ? 1 : 0;
 	dolibarr_set_const($db, "VERIFACTU_AUTO_SEND", $auto_send, 'int', 0, '', $conf->entity);
+	$production_ack = GETPOST("VERIFACTU_PRODUCTION_ACK", 'alpha') ? 1 : 0;
+	dolibarr_set_const($db, "VERIFACTU_PRODUCTION_ACK", $production_ack, 'int', 0, '', $conf->entity);
 
 	// ---------------------------------------------
 	// PROCESAR ZIP → cert.pem + key.pem + ca-bundle.crt
@@ -118,15 +120,14 @@ if ($action == 'save') {
 // Recuperar valores actuales
 $mode      = getDolGlobalString('VERIFACTU_MODE');
 $auto_send = getDolGlobalInt('VERIFACTU_AUTO_SEND');
+$production_ack = getDolGlobalInt('VERIFACTU_PRODUCTION_ACK');
 
 // -------------------- VIEW --------------------
 llxHeader('', 'Configuración VeriFactu 104', '', '', 0, 0, '', '', 0, 0, 'none');
 print load_fiche_titre('Configuración VeriFactu 104', '', 'fa-file');
 print '<div class="info" style="background:#fff3cd;border:1px solid #ffeeba;padding:12px;margin-bottom:20px;">
-<b>Aviso importante:</b><br>
-Este módulo genera todos los elementos obligatorios del RSIF (hash, XML, QR y trazabilidad), pero <b>no incluye el método de envío automático a Hacienda</b>.<br><br>
-Si activas la opción de “Envío automático”, debes haber implementado previamente tu propio método de envío VeriFactu, y siempre probar primero en el entorno de <b>pruebas</b>.<br><br>
-No actives el modo “Producción” sin haber desarrollado y validado ese método. De lo contrario, aparecerán errores al intentar enviar las facturas.
+<b>Versión experimental mantenida por Check 4 Cyber SARL.</b><br>
+No constituye una declaración responsable RSIF. Use primero un entorno aislado y AEAT de pruebas. La producción permanece bloqueada hasta confirmación explícita.
 </div>';
 
 // Inicio formulario
@@ -150,6 +151,9 @@ print '</td></tr>';
 
 print '<tr><td>Envío automático a Hacienda</td><td>';
 print '<input type="checkbox" name="VERIFACTU_AUTO_SEND" value="1"' . ($auto_send ? ' checked' : '') . '> Activar';
+print '</td></tr>';
+print '<tr><td>Confirmación de producción</td><td>';
+print '<label><input type="checkbox" name="VERIFACTU_PRODUCTION_ACK" value="1"'.($production_ack ? ' checked' : '').'> Confirmo que esta instalación y versión han superado el plan de validación antes de transmitir datos reales</label>';
 print '</td></tr>';
 print '</table><br>';
 

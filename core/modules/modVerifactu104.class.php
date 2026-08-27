@@ -3,6 +3,7 @@
  * Copyright (C) 2018-2019	Nicolas ZABOURI				<info@inovea-conseil.com>
  * Copyright (C) 2019-2024	Frédéric France				<frederic.france@free.fr>
  * Copyright (C) 2025		104 CUBES S.L Wayhoy!		<admin@wayhoy.com>
+ * Copyright (C) 2026		Check 4 Cyber SARL		<contact@c4c.lu>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -71,12 +72,12 @@ class modVerifactu104 extends DolibarrModules
 		$this->descriptionlong = "Verifactu104Description";
 
 		// Author
-		$this->editor_name = '104 Cubes. S.L.';
-		$this->editor_url = 'https://104cubes.com';		// Must be an external online web site
+		$this->editor_name = 'Check 4 Cyber SARL';
+		$this->editor_url = 'https://c4c.lu';		// Maintainer of this distribution
 		$this->editor_squarred_logo = '';					// Must be image filename into the module/img directory followed with @modulename. Example: 'myimage.png@verifactu104'
 
 		// Possible values for version are: 'development', 'experimental', 'dolibarr', 'dolibarr_deprecated', 'experimental_deprecated' or a version string like 'x.y.z'
-		$this->version = '1.0';
+		$this->version = '0.2.0-experimental';
 		// Url to the file with your last numberversion of this module
 		//$this->url_last_version = 'http://www.example.com/versionmodule.txt';
 
@@ -151,14 +152,14 @@ class modVerifactu104 extends DolibarrModules
 		$this->langfiles = array("verifactu104@verifactu104");
 
 		// Prerequisites
-		$this->phpmin = array(7, 1); // Minimum version of PHP required by module
+		$this->phpmin = array(7, 4); // Supported baseline for maintained Dolibarr versions
 		// $this->phpmax = array(8, 0); // Maximum version of PHP required by module
-		$this->need_dolibarr_version = array(19, -3); // Minimum version of Dolibarr required by module
-		// $this->max_dolibarr_version = array(19, -3); // Maximum version of Dolibarr required by module
+		$this->need_dolibarr_version = array(19, 0); // Tested compatibility starts at Dolibarr 19
+		$this->max_dolibarr_version = array(22, 99); // Extend only after CI and runtime validation
 		$this->need_javascript_ajax = 0;
 
 		// Messages at activation
-		$this->warnings_activation = array(); // Warning to show when we activate module. array('always'='text') or array('FR'='textfr','MX'='textmx'...)
+		$this->warnings_activation = array('always' => 'Experimental build maintained by Check 4 Cyber SARL. Production AEAT transmission is locked until explicitly acknowledged in configuration.');
 		$this->warnings_activation_ext = array(); // Warning to show when we activate an external module. array('always'='text') or array('FR'='textfr','MX'='textmx'...)
 		//$this->automatic_activation = array('FR'=>'Verifactu104WasAutomaticallyActivatedBecauseOfYourCountryChoice');
 		//$this->always_enabled = true;								// If true, can't be disabled

@@ -1,11 +1,12 @@
 <?php
 /*  Verifactu104 - Módulo Veri*Factu para Dolibarr
  *  (C) 2025 104 CUBES S.L (Wayhoy!)
+ *  (C) 2026 Check 4 Cyber SARL
  *  Licencia GPL v3
  */
 
 require_once DOL_DOCUMENT_ROOT . '/core/class/commonhookactions.class.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/lib/verifactu104.lib.php';
+dol_include_once('/verifactu104/lib/verifactu104.lib.php');
 
 use setasign\Fpdi\Tcpdf\Fpdi;
 
@@ -198,6 +199,11 @@ class ActionsVerifactu104 extends CommonHookActions
             $base = 'https://prewww1.aeat.es/wlpl/TIKE-CONT/ws/SistemaFacturacion/';
             dol_syslog("VERIFACTU_SEND: Usando entorno de PRUEBAS", LOG_DEBUG);
         } elseif (in_array($mode, array('prod', 'produccion', 'producción'), true)) {
+            if (empty($conf->global->VERIFACTU_PRODUCTION_ACK)) {
+                dol_syslog('VERIFACTU_SEND: Producción bloqueada: falta confirmación explícita', LOG_ERR);
+                setEventMessages('Envío a producción bloqueado. Complete la validación y confirmación de producción en la configuración.', null, 'errors');
+                return false;
+            }
             // Entorno de producción
             $base = 'https://www.agenciatributaria.gob.es/wlpl/TIKE-CONT/ws/SistemaFacturacion/';
             dol_syslog("VERIFACTU_SEND: Usando entorno de PRODUCCIÓN", LOG_DEBUG);
@@ -230,10 +236,20 @@ class ActionsVerifactu104 extends CommonHookActions
             return false;
         }
 
+        if (!is_readable($cert_file) || !is_readable($key_file)) {
+            dol_syslog('VERIFACTU_SEND: Certificado o clave privada ausentes/no legibles', LOG_ERR);
+            setEventMessages('No se puede enviar: certificado o clave privada ausentes/no legibles.', null, 'errors');
+            return false;
+        }
+
+        if (!function_exists('curl_init')) {
+            setEventMessages('La extensión PHP cURL es obligatoria para el envío.', null, 'errors');
+            return false;
+        }
+
         $xml_data = file_get_contents($xml_path);
 
         // === Envío real ===
-        $ch = curl_init($url);
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_SSLCERT        => $cert_file,
@@ -280,19 +296,10 @@ class ActionsVerifactu104 extends CommonHookActions
         $mensaje = "Factura NO enviada, revisa el XML generado para ver los motivos.";
         $type = 'errors';
         $retryDetected = false;
-        // --- SUBSANACIÓN: Estado INCORRECTO devuelto por AEAT ---
-        $estado_nodes = $dom->getElementsByTagName('Estado');
-        if ($estado_nodes->length > 0) {
-            $estado_val = strtoupper(trim($estado_nodes->item(0)->nodeValue));
-
-            if ($estado_val === 'INCORRECTO') {
-                $estado = 'subsanar';
-                $mensaje = "La AEAT devolvió 'INCORRECTO'. Requiere subsanación del envío.";
-                $type = 'warnings';
-
-                dol_syslog("VERIFACTU_SEND: Respuesta AEAT requiere SUBSANACIÓN", LOG_WARNING);
-                $this->verifactu_add_history($object, 'SIF_SUBSANAR', 'Requiere subsanación por AEAT');
-            }
+        if ($response === false || $curl_error !== '') {
+            $mensaje = 'Error de transporte al contactar con AEAT: ' . $curl_error;
+        } elseif ($http_code < 200 || $http_code >= 300) {
+            $mensaje = 'AEAT devolvió HTTP ' . ((int) $http_code) . '.';
         }
         if (!empty($response)) {
             libxml_use_internal_errors(true);
@@ -307,6 +314,10 @@ class ActionsVerifactu104 extends CommonHookActions
                         $estado = 'enviado';
                         $mensaje = "Factura enviada correctamente a AEAT.";
                         $type = 'mesgs';
+                    } elseif ($estado_val === 'INCORRECTO') {
+                        $estado = 'subsanar';
+                        $mensaje = "La AEAT devolvió 'INCORRECTO'. Requiere subsanación.";
+                        $type = 'warnings';
                     }
                 }
                 // Buscar <CodigoError>
@@ -318,8 +329,8 @@ class ActionsVerifactu104 extends CommonHookActions
             }
 
             // Detectar RetryAfter
-            $retry_nodes = $dom->getElementsByTagName('RetryAfter');
-            if ($retry_nodes->length > 0) {
+            $retry_nodes = isset($dom) ? $dom->getElementsByTagName('RetryAfter') : null;
+            if ($retry_nodes && $retry_nodes->length > 0) {
                 $wait = (int) trim($retry_nodes->item(0)->nodeValue);
                 if ($wait > 0) {
                     $retryDetected = true;

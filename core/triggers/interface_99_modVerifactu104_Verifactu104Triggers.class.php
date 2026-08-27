@@ -1,9 +1,9 @@
 <?php
 
 require_once DOL_DOCUMENT_ROOT . '/core/triggers/dolibarrtriggers.class.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/lib/verifactu104.lib.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/class/VerifactuXMLBuilder.class.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/class/actions_verifactu104.class.php';
+dol_include_once('/verifactu104/lib/verifactu104.lib.php');
+dol_include_once('/verifactu104/class/VerifactuXMLBuilder.class.php');
+dol_include_once('/verifactu104/class/actions_verifactu104.class.php');
 class InterfaceVerifactu104Triggers extends DolibarrTriggers
 {
     public function __construct($db)
@@ -103,7 +103,7 @@ class InterfaceVerifactu104Triggers extends DolibarrTriggers
                     @unlink($qr_file);
                 }
 
-                return 1;
+                return 0;
 
 
             case 'BILL_UNVALIDATE':
