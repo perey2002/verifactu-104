@@ -1,11 +1,12 @@
 <?php
 /*  Verifactu104 - Módulo Veri*Factu para Dolibarr
  *  (C) 2025 104 CUBES S.L (Wayhoy!)
+ *  (C) 2026 Check 4 Cyber SARL
  *  Licencia GPL v3
  */
 
 require_once DOL_DOCUMENT_ROOT . '/core/class/commonhookactions.class.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/lib/verifactu104.lib.php';
+dol_include_once('/verifactu104/lib/verifactu104.lib.php');
 
 use setasign\Fpdi\Tcpdf\Fpdi;
 
@@ -110,6 +111,7 @@ class ActionsVerifactu104 extends CommonHookActions
 
     public function getHashPrev($object)
     {
+        global $conf;
         $db = $this->db;
 
         // Serie = parte alfabética de la referencia
@@ -124,6 +126,8 @@ class ActionsVerifactu104 extends CommonHookActions
         JOIN " . MAIN_DB_PREFIX . "facture f ON f.rowid = ef.fk_object
         WHERE ef.hash_verifactu IS NOT NULL
           AND ef.hash_verifactu <> ''
+          AND f.rowid <> " . ((int) $object->id) . "
+          AND f.entity = " . ((int) $conf->entity) . "
           AND f.ref LIKE '" . $db->escape($serie) . "%'
     ";
 
@@ -172,6 +176,59 @@ class ActionsVerifactu104 extends CommonHookActions
         return $records[0]['hash'];
     }
 
+    /** Return the latest earlier invoice record in the same inferred series. */
+    public function getPreviousInvoiceRecord($object)
+    {
+        global $conf;
+
+        $serie = preg_replace('/[^A-Za-z]/', '', (string) $object->ref);
+        $sql = "SELECT f.ref, f.datef, ef.hash_verifactu AS hash
+            FROM " . MAIN_DB_PREFIX . "facture f
+            JOIN " . MAIN_DB_PREFIX . "facture_extrafields ef ON ef.fk_object = f.rowid
+            WHERE f.entity = " . ((int) $conf->entity) . "
+              AND f.rowid <> " . ((int) $object->id) . "
+              AND f.ref LIKE '" . $this->db->escape($serie) . "%'
+              AND ef.hash_verifactu IS NOT NULL AND ef.hash_verifactu <> ''
+            ORDER BY ef.verifactu_timestamp DESC, f.rowid DESC";
+        $res = $this->db->query($sql);
+        if (!$res || !($row = $this->db->fetch_object($res))) {
+            return null;
+        }
+
+        return array(
+            'ref' => $row->ref,
+            'date' => dol_print_date($this->db->jdate($row->datef), '%d-%m-%Y'),
+            'hash' => strtoupper($row->hash),
+        );
+    }
+
+    /**
+     * Build the exact field sequence used by RRSIF for a RegistroAlta SHA-256.
+     * The timestamp must be generated once and reused in both the hash and XML.
+     */
+    public function buildRegistroAltaHashInput($object, $timestamp)
+    {
+        global $conf;
+
+        $issuer = getDolGlobalString('MAIN_INFO_SIREN');
+        if ($issuer === '') {
+            $issuer = getDolGlobalString('MAIN_INFO_TVAINTRA');
+        }
+        if ($issuer === '') {
+            throw new RuntimeException('Falta el NIF del emisor en la configuración de la entidad.');
+        }
+        $type = ((int) $object->type === Facture::TYPE_CREDIT_NOTE) ? 'R1' : 'F1';
+
+        return 'IDEmisorFactura=' . $issuer
+            . '&NumSerieFactura=' . $object->ref
+            . '&FechaExpedicionFactura=' . dol_print_date($object->date, '%d-%m-%Y')
+            . '&TipoFactura=' . $type
+            . '&CuotaTotal=' . number_format((float) $object->total_tva, 2, '.', '')
+            . '&ImporteTotal=' . number_format((float) $object->total_ttc, 2, '.', '')
+            . '&Huella=' . strtoupper((string) ($object->array_options['options_hash_prev'] ?? ''))
+            . '&FechaHoraHusoGenRegistro=' . $timestamp;
+    }
+
     // Método que envía el XML a la AEAT
 
     public function sendToAEAT($xml_path, $object)
@@ -198,6 +255,11 @@ class ActionsVerifactu104 extends CommonHookActions
             $base = 'https://prewww1.aeat.es/wlpl/TIKE-CONT/ws/SistemaFacturacion/';
             dol_syslog("VERIFACTU_SEND: Usando entorno de PRUEBAS", LOG_DEBUG);
         } elseif (in_array($mode, array('prod', 'produccion', 'producción'), true)) {
+            if (empty($conf->global->VERIFACTU_PRODUCTION_ACK)) {
+                dol_syslog('VERIFACTU_SEND: Producción bloqueada: falta confirmación explícita', LOG_ERR);
+                setEventMessages('Envío a producción bloqueado. Complete la validación y confirmación de producción en la configuración.', null, 'errors');
+                return false;
+            }
             // Entorno de producción
             $base = 'https://www.agenciatributaria.gob.es/wlpl/TIKE-CONT/ws/SistemaFacturacion/';
             dol_syslog("VERIFACTU_SEND: Usando entorno de PRODUCCIÓN", LOG_DEBUG);
@@ -230,10 +292,20 @@ class ActionsVerifactu104 extends CommonHookActions
             return false;
         }
 
+        if (!is_readable($cert_file) || !is_readable($key_file)) {
+            dol_syslog('VERIFACTU_SEND: Certificado o clave privada ausentes/no legibles', LOG_ERR);
+            setEventMessages('No se puede enviar: certificado o clave privada ausentes/no legibles.', null, 'errors');
+            return false;
+        }
+
+        if (!function_exists('curl_init')) {
+            setEventMessages('La extensión PHP cURL es obligatoria para el envío.', null, 'errors');
+            return false;
+        }
+
         $xml_data = file_get_contents($xml_path);
 
         // === Envío real ===
-        $ch = curl_init($url);
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_SSLCERT        => $cert_file,
@@ -280,19 +352,10 @@ class ActionsVerifactu104 extends CommonHookActions
         $mensaje = "Factura NO enviada, revisa el XML generado para ver los motivos.";
         $type = 'errors';
         $retryDetected = false;
-        // --- SUBSANACIÓN: Estado INCORRECTO devuelto por AEAT ---
-        $estado_nodes = $dom->getElementsByTagName('Estado');
-        if ($estado_nodes->length > 0) {
-            $estado_val = strtoupper(trim($estado_nodes->item(0)->nodeValue));
-
-            if ($estado_val === 'INCORRECTO') {
-                $estado = 'subsanar';
-                $mensaje = "La AEAT devolvió 'INCORRECTO'. Requiere subsanación del envío.";
-                $type = 'warnings';
-
-                dol_syslog("VERIFACTU_SEND: Respuesta AEAT requiere SUBSANACIÓN", LOG_WARNING);
-                $this->verifactu_add_history($object, 'SIF_SUBSANAR', 'Requiere subsanación por AEAT');
-            }
+        if ($response === false || $curl_error !== '') {
+            $mensaje = 'Error de transporte al contactar con AEAT: ' . $curl_error;
+        } elseif ($http_code < 200 || $http_code >= 300) {
+            $mensaje = 'AEAT devolvió HTTP ' . ((int) $http_code) . '.';
         }
         if (!empty($response)) {
             libxml_use_internal_errors(true);
@@ -307,6 +370,10 @@ class ActionsVerifactu104 extends CommonHookActions
                         $estado = 'enviado';
                         $mensaje = "Factura enviada correctamente a AEAT.";
                         $type = 'mesgs';
+                    } elseif ($estado_val === 'INCORRECTO') {
+                        $estado = 'subsanar';
+                        $mensaje = "La AEAT devolvió 'INCORRECTO'. Requiere subsanación.";
+                        $type = 'warnings';
                     }
                 }
                 // Buscar <CodigoError>
@@ -318,8 +385,8 @@ class ActionsVerifactu104 extends CommonHookActions
             }
 
             // Detectar RetryAfter
-            $retry_nodes = $dom->getElementsByTagName('RetryAfter');
-            if ($retry_nodes->length > 0) {
+            $retry_nodes = isset($dom) ? $dom->getElementsByTagName('RetryAfter') : null;
+            if ($retry_nodes && $retry_nodes->length > 0) {
                 $wait = (int) trim($retry_nodes->item(0)->nodeValue);
                 if ($wait > 0) {
                     $retryDetected = true;
@@ -346,12 +413,12 @@ class ActionsVerifactu104 extends CommonHookActions
         /* === Actualizar extrafield verifactu_estado correctamente === */
         try {
             // Asegurar extrafields cargados
-            if (empty($object->array_options) || !array_key_exists('verifactu_estado', $object->array_options)) {
+            if (empty($object->array_options) || !array_key_exists('options_verifactu_estado', $object->array_options)) {
                 $object->fetch_optionals();
             }
 
             // Asignar estado
-            $object->array_options['verifactu_estado'] = $estado;
+            $object->array_options['options_verifactu_estado'] = $estado;
 
             // Guardar
             $res = $object->insertExtraFields();
@@ -502,101 +569,49 @@ class ActionsVerifactu104 extends CommonHookActions
                 return 0;
             }
         }
-        try {
-            // Cargar FPDI
-            require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/lib/FPDI/src/autoload.php';
-
-            $newpdf = new Fpdi();
-            $pagecount = $newpdf->setSourceFile($pdf_file);
-
-            for ($i = 1; $i <= $pagecount; $i++) {
-                $tpl = $newpdf->importPage($i);
-                $size = $newpdf->getTemplateSize($tpl);
-                $newpdf->AddPage($size['orientation'], [$size['width'], $size['height']]);
-                $newpdf->useTemplate($tpl);
-            }
-
-            // Nueva página certificada
-            $newpdf->AddPage('P', 'A4');
-            $newpdf->SetMargins(20, 20, 20);
-
-            // Título centrado
-            $newpdf->SetFont('Helvetica', 'B', 14);
-            $newpdf->Ln(5);
-            $newpdf->Cell(0, 10, 'Certificación de Integridad de Factura (Veri*Factu)', 0, 1, 'C');
-
-            $newpdf->SetLineWidth(0.3);
-            $newpdf->Line(20, $newpdf->GetY(), 190, $newpdf->GetY());
-            $newpdf->Ln(8);
-
-            // QR centrado
-            $newpdf->Image($qr_file, 80, $newpdf->GetY(), 50, 50, '', '', '', true);
-            $newpdf->Ln(60);
-
-            // Hash
-            $sql = "SELECT hash_verifactu FROM " . MAIN_DB_PREFIX . "facture WHERE rowid = " . (int)$object->id;
-            $resql = $this->db->query($sql);
-            $hash_val = ($resql && $obj = $this->db->fetch_object($resql)) ? $obj->hash_verifactu : '';
-
-            $newpdf->SetFont('Helvetica', '', 10);
-            $newpdf->MultiCell(0, 6, "Hash criptográfico (SHA256):\n" . $hash_val, 0, 'L');
-            $newpdf->Ln(5);
-
-            $newpdf->MultiCell(
-                0,
-                6,
-                "Esta factura ha sido firmada electrónicamente conforme a la normativa Veri*Factu, "
-                    . "mediante un encadenamiento criptográfico que garantiza que no ha sido alterada.",
-                0,
-                'L'
-            );
-
-            $newpdf->Ln(10);
-            $newpdf->SetFont('Helvetica', 'I', 9);
-            $newpdf->Cell(0, 5, 'Documento generado automáticamente.', 0, 1, 'C');
-
-            // Guardar PDF final
-            $newpdf->Output($pdf_file, 'F');
-
-            dol_syslog("VERIFACTU_HOOK: PDF actualizado correctamente", LOG_DEBUG);
-        } catch (Exception $e) {
-            dol_syslog("VERIFACTU_HOOK: ERROR FPDI → " . $e->getMessage(), LOG_ERR);
-            return -1;
-        }
+        // The upstream implementation attempted to embed the QR before creating it and
+        // labelled the page as a certification. Keep the original invoice untouched in
+        // the experimental line; a later, tested document hook will render QR/legend.
 
 
         // === GENERAR XML VERIFACTU (usando VerifactuXMLBuilder) ===
         dol_syslog("VERIFACTU_HOOK: INICIO generación XML VeriFactu", LOG_DEBUG);
         try {
-            require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/class/VerifactuXMLBuilder.class.php';
+            dol_include_once('/verifactu104/class/VerifactuXMLBuilder.class.php');
             $ref = dol_sanitizeFileName($object->ref);
             $xml_path = $facture_dir . "/verifactu_" . $ref . ".xml";
             dol_syslog("VERIFACTU_HOOK: Ruta XML = $xml_path", LOG_DEBUG);
             // Obtener hash anterior desde extrafields
-            $hash_prev   = $object->array_options['hash_prev'] ?? '';
-            $hash_actual = $object->array_options['hash_verifactu'] ?? '';
-            $timestamp   = $object->array_options['verifactu_timestamp'] ?? dol_now();
+            $hash_prev   = $object->array_options['options_hash_prev'] ?? '';
+            $hash_actual = $object->array_options['options_hash_verifactu'] ?? '';
+            $timestamp   = $object->array_options['options_verifactu_timestamp'] ?? dol_now();
 
             // === Si los hashes no existen (primera generación), generarlos y guardarlos aquí ===
             if (empty($hash_actual)) {
                 dol_syslog("VERIFACTU_HOOK: Hash vacío → generando nuevo hash y guardando extrafields", LOG_DEBUG);
 
                 // Obtener hash previo correcto según la serie
-                $hash_prev = $this->getHashPrev($object);
+                $previous_record = $this->getPreviousInvoiceRecord($object);
+                $hash_prev = $previous_record ? $previous_record['hash'] : '';
+                $object->array_options['options_verifactu_prev_ref'] = $previous_record ? $previous_record['ref'] : '';
+                $object->array_options['options_verifactu_prev_date'] = $previous_record ? $previous_record['date'] : '';
 
                 // Normalizar a mayúsculas el hash previo (si existe)
                 if (!empty($hash_prev)) {
                     $hash_prev = strtoupper($hash_prev);
                 }
 
-                // Generar hash actual nuevo (ya en mayúsculas)
-                $hash_actual = strtoupper(hash('sha256', uniqid('vf', true)));
                 $timestamp   = dol_now();
 
+                // Persist the timestamp once and hash the official field sequence.
+                $timestamp_iso = date('c', $timestamp);
+                $object->array_options['options_hash_prev'] = $hash_prev;
+                $hash_actual = strtoupper(hash('sha256', $this->buildRegistroAltaHashInput($object, $timestamp_iso)));
+
                 // Guardar extrafields AHORA, cuando la factura ya está con su ref definitiva
-                $object->array_options['hash_verifactu']      = $hash_actual;
-                $object->array_options['hash_prev']           = $hash_prev;
-                $object->array_options['verifactu_timestamp'] = $timestamp;
+                $object->array_options['options_hash_verifactu']      = $hash_actual;
+                $object->array_options['options_hash_prev']           = $hash_prev;
+                $object->array_options['options_verifactu_timestamp'] = $timestamp;
                 $object->insertExtraFields();
 
                 dol_syslog("VERIFACTU_HOOK: Hashes generados y guardados en afterPDFCreation", LOG_DEBUG);
@@ -605,20 +620,12 @@ class ActionsVerifactu104 extends CommonHookActions
             // Normalizar SIEMPRE a mayúsculas antes de usarlos en QR/XML
             $hash_actual = strtoupper((string) $hash_actual);
             $hash_prev   = strtoupper((string) $hash_prev);
-            // === Si los hashes no existen (primera generación), generarlos y guardarlos aquí ===
-            if (empty($hash_actual)) {
-                dol_syslog("VERIFACTU_HOOK: Hash vacío → generando nuevo hash y guardando extrafields", LOG_DEBUG);
-                // Obtener hash previo correcto según la serie
-                $hash_prev = $this->getHashPrev($object);
-                // Generar hash actual nuevo
-                $hash_actual = hash('sha256', uniqid('vf', true));
-                $timestamp = dol_now();
-                // Guardar extrafields AHORA, cuando la factura ya está con su ref definitiva
-                $object->array_options['hash_verifactu'] = $hash_actual;
-                $object->array_options['hash_prev'] = $hash_prev;
-                $object->array_options['verifactu_timestamp'] = $timestamp;
-                $object->insertExtraFields();
-                dol_syslog("VERIFACTU_HOOK: Hashes generados y guardados en afterPDFCreation", LOG_DEBUG);
+            if ($hash_prev !== '' && empty($object->array_options['options_verifactu_prev_ref'])) {
+                $previous_record = $this->getPreviousInvoiceRecord($object);
+                if ($previous_record) {
+                    $object->array_options['options_verifactu_prev_ref'] = $previous_record['ref'];
+                    $object->array_options['options_verifactu_prev_date'] = $previous_record['date'];
+                }
             }
             dol_syslog("VERIFACTU_HOOK: hash_prev=$hash_prev hash_actual=$hash_actual timestamp=$timestamp", LOG_DEBUG);
             if (empty($hash_actual)) {
@@ -638,7 +645,7 @@ class ActionsVerifactu104 extends CommonHookActions
             $fecha_qr    = dol_print_date($object->date, '%d-%m-%Y');     // MISMA fecha que hash
             $total_fmt   = number_format((float) $object->total_ttc, 2, '.', '');
             // Seleccionar URL
-            $mode = $conf->global->VERIFACTU_MODE ?? '';
+            $mode = getDolGlobalString('VERIFACTU_MODE');
             if (in_array($mode, ['test', 'prod'], true)) {
                 $qr_url_base = "https://www2.agenciatributaria.gob.es/wlpl/TIKE-CONT/ValidarQR";
             } else {
@@ -750,7 +757,7 @@ class ActionsVerifactu104 extends CommonHookActions
             }
 
             // Solo si está rechazada o con error
-            $sql = "SELECT verifactu_estado FROM llx_facture_extrafields WHERE fk_object = " . ((int)$object->id) . " LIMIT 1";
+            $sql = "SELECT verifactu_estado FROM " . MAIN_DB_PREFIX . "facture_extrafields WHERE fk_object = " . ((int)$object->id) . " LIMIT 1";
             $res = $this->db->query($sql);
             $estado = '';
             if ($res && $obj = $this->db->fetch_object($res)) {
@@ -774,7 +781,7 @@ class ActionsVerifactu104 extends CommonHookActions
                 $label  = "Subsanar incorrección en envío a AEAT";
             }
             // Crear botón
-            $url = $_SERVER['PHP_SELF'] . '?id=' . (int) $object->id . '&action=' . $accion;
+            $url = $_SERVER['PHP_SELF'] . '?id=' . (int) $object->id . '&action=' . $accion . '&token=' . newToken();
 
 
             $html = '<div class="inline-block">'

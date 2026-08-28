@@ -1,0 +1,8 @@
+.DS_Store
+*.p12
+*.pfx
+*.pem
+*.key
+*.crt
+certificados.zip
+acuse_verifactu.xml

@@ -1,9 +1,9 @@
 <?php
 
 require_once DOL_DOCUMENT_ROOT . '/core/triggers/dolibarrtriggers.class.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/lib/verifactu104.lib.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/class/VerifactuXMLBuilder.class.php';
-require_once DOL_DOCUMENT_ROOT . '/custom/verifactu104/class/actions_verifactu104.class.php';
+dol_include_once('/verifactu104/lib/verifactu104.lib.php');
+dol_include_once('/verifactu104/class/VerifactuXMLBuilder.class.php');
+dol_include_once('/verifactu104/class/actions_verifactu104.class.php');
 class InterfaceVerifactu104Triggers extends DolibarrTriggers
 {
     public function __construct($db)
@@ -103,63 +103,27 @@ class InterfaceVerifactu104Triggers extends DolibarrTriggers
                     @unlink($qr_file);
                 }
 
-                return 1;
+                return 0;
 
 
             case 'BILL_UNVALIDATE':
-                // Aquí podrías reimplementar la lógica de bloqueo (última factura, estado enviado, etc.)
-                // De momento, mantenemos el bloqueo duro:
-                setEventMessages("No se puede pasar a borrador una factura enviada a la AEAT.", null, 'errors');
-                return -1;
-            case 'BILL_CANCEL':
-                dol_syslog("VERIFACTU: Generando anulación para factura " . $object->ref);
-
-
-
-                $facture = new Facture($this->db);
-                $facture->fetch($object->id);
-                $facture->fetch_thirdparty();
-                $facture->fetch_optionals();
-
-                // Hash previo: último registro de la serie (alta / subsanación / anulación previa)
-                $hash_prev = $this->getLastHashForSerie($object);
-
-                $builder = new VerifactuXMLBuilder($this->db, $conf);
-
-                $timestamp = dol_now();
-
-                // Generar XML de anulación (RegistroAnulacion)
-                $xml = $builder->buildRegistroAnulacion(
-                    $facture,
-                    $hash_prev,
-                    $timestamp
-                );
-
-                $dir = $conf->facture->dir_output . "/" . $object->ref;
-                dol_mkdir($dir);
-                $xml_path = $dir . "/verifactu_anulacion.xml";
-
-                file_put_contents($xml_path, $xml);
-
-                $actions = new ActionsVerifactu104($this->db);
-                $actions->verifactu_add_history($object, 'SIF_HASH', 'Hash generado: ' . $hash_new);
-
-                // Enviar automáticamente a la AEAT
-                $actions = new ActionsVerifactu104($this->db);
-                $resSend = $actions->sendToAEAT($xml_path, $facture);
-
-                if ($resSend) {
-                    $facture->updateExtraField('verifactu_estado', 'anulado_enviado');
-                    $actions = new ActionsVerifactu104($this->db);
-                    $actions->verifactu_add_history($object, 'SIF_HASH', 'Hash generado: ' . $hash_new);
-                } else {
-                    // Si falla el envío, dejamos estado solo como anulado
-                    $facture->updateExtraField('verifactu_estado', 'anulado_error_envio');
-                    $actions = new ActionsVerifactu104($this->db);
-                    $actions->verifactu_add_history($object, 'SIF_HASH', 'Hash generado: ' . $hash_new);
+                $object->fetch_optionals();
+                $state = $object->array_options['options_verifactu_estado'] ?? '';
+                if (in_array($state, array('enviado', 'anulado_enviado'), true)) {
+                    setEventMessages("No se puede pasar a borrador una factura enviada a la AEAT.", null, 'errors');
+                    return -1;
                 }
-
-                return 1;
+                return 0;
+            case 'BILL_CANCEL':
+                // Upstream called non-existent builder/hash methods here. Never create a
+                // fictitious cancellation record. Block only invoices already transmitted;
+                // cancellation support will be enabled after XSD and AEAT integration tests.
+                $object->fetch_optionals();
+                if (($object->array_options['options_verifactu_estado'] ?? '') === 'enviado') {
+                    setEventMessages('La anulación VeriFactu aún no está validada en esta versión experimental.', null, 'errors');
+                    return -1;
+                }
+                return 0;
 
 
             default:

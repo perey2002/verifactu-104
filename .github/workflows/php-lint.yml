@@ -1,0 +1,19 @@
+name: PHP compatibility checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.1', '8.2', '8.3', '8.4']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - name: Lint first-party PHP
+        run: find admin class core -type f -name '*.php' -print0 | xargs -0 -n1 php -l

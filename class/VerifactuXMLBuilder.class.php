@@ -3,6 +3,11 @@
 class VerifactuXMLBuilder
 {
 
+    private function xml($value)
+    {
+        return htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+    }
+
     public function buildRegistroAltaXML($factura, $tipoFacturaAeat)
     {
         global $conf;
@@ -15,9 +20,9 @@ class VerifactuXMLBuilder
         $receptor_nif = $factura->thirdparty->idprof1 ?? '';
 
         // Fechas
-        $fecha_exp = dol_print_date($factura->date, '%Y-%m-%d');
+        $fecha_exp = dol_print_date($factura->date, '%d-%m-%Y');
         $fecha_operacion = !empty($factura->date_pointoftax)
-            ? dol_print_date($factura->date_pointoftax, '%Y-%m-%d')
+            ? dol_print_date($factura->date_pointoftax, '%d-%m-%Y')
             : $fecha_exp;
 
         // Totales
@@ -33,7 +38,15 @@ class VerifactuXMLBuilder
         // Encadenamiento
         $hash_prev   = $factura->array_options['options_hash_prev'] ?? '';
         $hash_actual = $factura->array_options['options_hash_verifactu'] ?? '';
-        $timestamp   = date('c');
+        $timestamp_unix = (int) ($factura->array_options['options_verifactu_timestamp'] ?? dol_now());
+        $timestamp   = date('c', $timestamp_unix);
+
+        $system_name = getDolGlobalString('VERIFACTU_SYSTEM_NAME') ?: 'VeriFactu for Dolibarr';
+        $system_id = getDolGlobalString('VERIFACTU_SYSTEM_ID') ?: 'C4C-DOLIBARR';
+        $installation_id = getDolGlobalString('VERIFACTU_INSTALLATION_ID');
+        if ($installation_id === '') {
+            throw new RuntimeException('Falta VERIFACTU_INSTALLATION_ID en la configuración.');
+        }
 
         // Construcción base del array d
         $d = [
@@ -51,7 +64,12 @@ class VerifactuXMLBuilder
             'hash_prev'       => $hash_prev,
             'hash_actual'     => $hash_actual,
             'timestamp'       => $timestamp,
-            'subsanacion'     => 'N'
+            'subsanacion'     => 'N',
+            'system_name'     => $system_name,
+            'system_id'       => $system_id,
+            'installation_id' => $installation_id,
+            'prev_ref'        => $factura->array_options['options_verifactu_prev_ref'] ?? '',
+            'prev_date'       => $factura->array_options['options_verifactu_prev_date'] ?? '',
         ];
 
         // Rectificativa
@@ -82,6 +100,12 @@ class VerifactuXMLBuilder
             }
         }
         $d['desglose'] = $desglose;
+
+        foreach ($d as $key => $value) {
+            if (!is_array($value)) {
+                $d[$key] = $this->xml($value);
+            }
+        }
 
         // Plantilla XML
         $xml = <<<XML
@@ -117,21 +141,16 @@ class VerifactuXMLBuilder
     <sum1:ImporteTotal>{$d['total']}</sum1:ImporteTotal>
 
     <sum1:Encadenamiento>
-        <sum1:RegistroAnterior>
-            <sum1:IDEmisorFactura>{$d['emisor_nif']}</sum1:IDEmisorFactura>
-            <sum1:NumSerieFactura>{$d['ref']}</sum1:NumSerieFactura>
-            <sum1:FechaExpedicionFactura>{$d['fecha']}</sum1:FechaExpedicionFactura>
-            <sum1:Huella>{$d['hash_prev']}</sum1:Huella>
-        </sum1:RegistroAnterior>
+        {{ENCADENAMIENTO_XML}}
     </sum1:Encadenamiento>
 
     <sum1:SistemaInformatico>
         <sum1:NombreRazon>{$d['emisor_nombre']}</sum1:NombreRazon>
         <sum1:NIF>{$d['emisor_nif']}</sum1:NIF>
-        <sum1:NombreSistemaInformatico>NombreSistemaInformatico</sum1:NombreSistemaInformatico>
-        <sum1:IdSistemaInformatico>77</sum1:IdSistemaInformatico>
-        <sum1:Version>1.0.03</sum1:Version>
-        <sum1:NumeroInstalacion>383</sum1:NumeroInstalacion>
+        <sum1:NombreSistemaInformatico>{$d['system_name']}</sum1:NombreSistemaInformatico>
+        <sum1:IdSistemaInformatico>{$d['system_id']}</sum1:IdSistemaInformatico>
+        <sum1:Version>0.2.0</sum1:Version>
+        <sum1:NumeroInstalacion>{$d['installation_id']}</sum1:NumeroInstalacion>
         <sum1:TipoUsoPosibleSoloVerifactu>S</sum1:TipoUsoPosibleSoloVerifactu>
         <sum1:TipoUsoPosibleMultiOT>N</sum1:TipoUsoPosibleMultiOT>
         <sum1:IndicadorMultiplesOT>N</sum1:IndicadorMultiplesOT>
@@ -146,6 +165,9 @@ XML;
         // Reemplazar bloque de rectificativa
         if (!empty($d['rectificativa'])) {
             $r = $d['rectificativa'];
+            foreach ($r as $key => $value) {
+                $r[$key] = $this->xml($value);
+            }
             $rect = "
     <sum1:TipoRectificativa>{$r['tipo']}</sum1:TipoRectificativa>
     <sum1:FacturasRectificadas>
@@ -160,9 +182,27 @@ XML;
         }
         $xml = str_replace('{{RECTIFICATIVA_XML}}', $rect, $xml);
 
+        if ($d['hash_prev'] === '') {
+            $chain = '<sum1:PrimerRegistro>S</sum1:PrimerRegistro>';
+        } else {
+            if ($d['prev_ref'] === '' || $d['prev_date'] === '') {
+                throw new RuntimeException('Faltan los identificadores del registro anterior.');
+            }
+            $chain = '<sum1:RegistroAnterior>'
+                . '<sum1:IDEmisorFactura>'.$d['emisor_nif'].'</sum1:IDEmisorFactura>'
+                . '<sum1:NumSerieFactura>'.$d['prev_ref'].'</sum1:NumSerieFactura>'
+                . '<sum1:FechaExpedicionFactura>'.$d['prev_date'].'</sum1:FechaExpedicionFactura>'
+                . '<sum1:Huella>'.$d['hash_prev'].'</sum1:Huella>'
+                . '</sum1:RegistroAnterior>';
+        }
+        $xml = str_replace('{{ENCADENAMIENTO_XML}}', $chain, $xml);
+
         // Reemplazar bloque de desglose
         $detalle_xml = '';
         foreach ($d['desglose'] as $item) {
+            foreach ($item as $key => $value) {
+                $item[$key] = $this->xml($value);
+            }
             $detalle_xml .= "
         <sum1:DetalleDesglose>
             <sum1:ClaveRegimen>{$item['clave_regimen']}</sum1:ClaveRegimen>
