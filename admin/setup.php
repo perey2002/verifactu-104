@@ -15,6 +15,7 @@ $action = GETPOST('action', 'alpha');
 // Directorio seguro para certificados
 $upload_dir = DOL_DATA_ROOT . '/verifactu104/certs/';
 dol_mkdir($upload_dir);
+@chmod($upload_dir, 0700);
 
 // Guardar configuración
 if ($action == 'save') {
@@ -24,11 +25,16 @@ if ($action == 'save') {
 	dolibarr_set_const($db, "VERIFACTU_AUTO_SEND", $auto_send, 'int', 0, '', $conf->entity);
 	$production_ack = GETPOST("VERIFACTU_PRODUCTION_ACK", 'alpha') ? 1 : 0;
 	dolibarr_set_const($db, "VERIFACTU_PRODUCTION_ACK", $production_ack, 'int', 0, '', $conf->entity);
+	dolibarr_set_const($db, "VERIFACTU_SYSTEM_NAME", GETPOST("VERIFACTU_SYSTEM_NAME", 'alphanohtml'), 'chaine', 0, '', $conf->entity);
+	dolibarr_set_const($db, "VERIFACTU_SYSTEM_ID", GETPOST("VERIFACTU_SYSTEM_ID", 'alphanohtml'), 'chaine', 0, '', $conf->entity);
+	dolibarr_set_const($db, "VERIFACTU_INSTALLATION_ID", GETPOST("VERIFACTU_INSTALLATION_ID", 'alphanohtml'), 'chaine', 0, '', $conf->entity);
 
 	// ---------------------------------------------
 	// PROCESAR ZIP → cert.pem + key.pem + ca-bundle.crt
 	// ---------------------------------------------
 	if (!empty($_FILES['cert_zip']['tmp_name'])) {
+		setEventMessages('La importación ZIP se ha deshabilitado: use un PKCS#12 para evitar extracción insegura de rutas.', null, 'warnings');
+		/*
 		$tmp = $_FILES['cert_zip']['tmp_name'];
 		$destzip = $upload_dir . '/certificados.zip';
 		move_uploaded_file($tmp, $destzip);
@@ -61,6 +67,7 @@ if ($action == 'save') {
 		} else {
 			echo "<pre>❌ Error al abrir el ZIP</pre>";
 		}
+		*/
 	}
 
 	// ---------------------------------------------
@@ -95,12 +102,14 @@ if ($action == 'save') {
 				// Guardar CERT
 				if (!empty($certs['cert'])) {
 					file_put_contents($upload_dir . "cert.pem", $certs['cert']);
+					@chmod($upload_dir . "cert.pem", 0600);
 					setEventMessages("cert.pem generado correctamente", null, 'mesgs');
 				}
 
 				// Guardar KEY
 				if (!empty($certs['pkey'])) {
 					file_put_contents($upload_dir . "key.pem", $certs['pkey']);
+					@chmod($upload_dir . "key.pem", 0600);
 					setEventMessages("key.pem generado correctamente", null, 'mesgs');
 				}
 
@@ -121,6 +130,9 @@ if ($action == 'save') {
 $mode      = getDolGlobalString('VERIFACTU_MODE');
 $auto_send = getDolGlobalInt('VERIFACTU_AUTO_SEND');
 $production_ack = getDolGlobalInt('VERIFACTU_PRODUCTION_ACK');
+$system_name = getDolGlobalString('VERIFACTU_SYSTEM_NAME') ?: 'VeriFactu for Dolibarr';
+$system_id = getDolGlobalString('VERIFACTU_SYSTEM_ID') ?: 'C4C-DOLIBARR';
+$installation_id = getDolGlobalString('VERIFACTU_INSTALLATION_ID');
 
 // -------------------- VIEW --------------------
 llxHeader('', 'Configuración VeriFactu 104', '', '', 0, 0, '', '', 0, 0, 'none');
@@ -152,6 +164,9 @@ print '</td></tr>';
 print '<tr><td>Envío automático a Hacienda</td><td>';
 print '<input type="checkbox" name="VERIFACTU_AUTO_SEND" value="1"' . ($auto_send ? ' checked' : '') . '> Activar';
 print '</td></tr>';
+print '<tr><td>Nombre del sistema</td><td><input class="minwidth300" name="VERIFACTU_SYSTEM_NAME" value="'.dol_escape_htmltag($system_name).'"></td></tr>';
+print '<tr><td>Identificador del sistema</td><td><input class="minwidth300" name="VERIFACTU_SYSTEM_ID" value="'.dol_escape_htmltag($system_id).'"></td></tr>';
+print '<tr><td>Número de instalación</td><td><input class="minwidth300" name="VERIFACTU_INSTALLATION_ID" value="'.dol_escape_htmltag($installation_id).'" required></td></tr>';
 print '<tr><td>Confirmación de producción</td><td>';
 print '<label><input type="checkbox" name="VERIFACTU_PRODUCTION_ACK" value="1"'.($production_ack ? ' checked' : '').'> Confirmo que esta instalación y versión han superado el plan de validación antes de transmitir datos reales</label>';
 print '</td></tr>';
@@ -163,11 +178,8 @@ print '<tr class="liste_titre"><th>Certificados</th><th>Acción</th></tr>';
 
 // Método ZIP
 print '<tr>';
-print '<td>';
-print 'Sube un archivo ZIP que contenga <strong>cert.pem</strong>, <strong>key.pem</strong> y <strong>ca-bundle.crt</strong>.<br>';
-print 'Si el ZIP está vacío, se eliminarán los certificados existentes.';
-print '</td>';
-print '<td><input type="file" name="cert_zip" accept=".zip"></td>';
+print '<td>Importación ZIP deshabilitada por seguridad. Utilice PKCS#12.</td>';
+print '<td>—</td>';
 print '</tr>';
 
 // Método P12
